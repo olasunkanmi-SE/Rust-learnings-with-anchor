@@ -1,150 +1,192 @@
 use anchor_lang::prelude::*;
-use num_derive::{FromPrimitive, ToPrimitive};
+use anchor_lang::solana_program::clock::Clock;
 
-declare_id!("EHA4RUUTvAuKqSHuv2UrVnuAxrJdzDDf1CZtRKkhS9HK");
+pub mod constants;
 
-pub fn setup_game(ctx: Context<SetUpGame>, player_two: Pubkey) -> Result<()> {
-    ctx.accounts
-        .game
-        .start([ctx.accounts.player_one.key(), player_two])
-}
+declare_id!("A9xyxaBsjoBhyg5cRDUdXz1thVbpaHvd3te9jZGEsX2A");
 
-#[derive(
-    AnchorSerialize, AnchorDeserialize, FromPrimitive, ToPrimitive, Clone, Copy, PartialEq, Eq,
-)]
-pub enum Sign {
-    X,
-    O,
-}
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
-pub enum GameState {
-    Active,
-    Tie,
-    Won { winner: Pubkey },
-}
+#[program]
+pub mod event_management {
+    use super::*;
 
-#[derive(AnchorSerialize, AnchorDeserialize)]
-pub struct Tile {
-    row: u8,
-    column: u8,
-}
+    pub fn create_organizer(ctx: Context<CreateOrganizer>, name: String) -> Result<()> {
+        let organizer = &mut ctx.accounts.organizer;
+        organizer.name = name;
+        organizer.is_active = true;
+        organizer.authority = ctx.accounts.authority.key();
+        Ok(())
+    }
 
-#[error_code]
-pub enum TicTacToeError {
-    TileOutOfBounds,
-    TileAlreadySet,
-    GameAlreadyOver,
-    NotPlayersTurn,
-    GameAlreadyStarted,
-}
+    pub fn create_event(ctx: Context<CreateEvent>, props: EventAttribute) -> Result<()> {
+        let event = &mut ctx.accounts.event;
+        let organizer = &ctx.accounts.organizer;
 
-#[account]
-pub struct Game {
-    players: [Pubkey; 2],
-    turn: u8,
-    board: [[Option<Sign>; 3]; 3],
-    state: GameState,
+        require!(organizer.is_active, ErrorCode::OrganizerNotActive);
+        require!(
+            Clock::get()?.unix_timestamp < props.date,
+            ErrorCode::InvalidDate
+        );
+
+        validate_event_attributes(&props)?;
+
+        event.name = props.name;
+        event.date = props.date;
+        event.venue = props.venue;
+        event.total_tickets = props.total_tickets;
+        event.available_tickets = props.total_tickets;
+        event.base_price = props.base_price;
+        event.organizer = organizer.key();
+        event.is_active = true;
+        Ok(())
+    }
+
+    pub fn update_event(ctx: Context<UpdateEvent>, props: EventAttribute) -> Result<()> {
+        let event = &mut ctx.accounts.event;
+
+        require!(
+            Clock::get()?.unix_timestamp < props.date,
+            ErrorCode::InvalidDate
+        );
+        validate_event_attributes(&props)?;
+
+        event.name = props.name;
+        event.date = props.date;
+        event.venue = props.venue;
+        event.total_tickets = props.total_tickets;
+        event.available_tickets = props.total_tickets;
+        event.base_price = props.base_price;
+        Ok(())
+    }
+    //complete the functionality
+    pub fn close_event(ctx: Context<CloseEvent>) -> Result<()> {
+        let event = &mut ctx.accounts.event;
+        event.is_active = false;
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
-pub struct SetUpGame<'info> {
-    #[account(init, space=8 + Game::MAXIMUM_SIZE, payer = player_one)]
-    pub game: Account<'info, Game>,
+pub struct CreateOrganizer<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = constants::ORGANIZER_SPACE,
+        seeds = [b"organizer", authority.key().as_ref()],
+        bump
+    )]
+    pub organizer: Account<'info, Organizer>,
     #[account(mut)]
-    pub player_one: Signer<'info>,
+    pub authority: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
-impl Game {
-    pub const MAXIMUM_SIZE: usize = (32 * 2) + 1 + (9 * (1 + 1)) + (32 + 1);
-    pub fn start(&mut self, players: [Pubkey; 2]) -> Result<()> {
-        require_eq!(self.turn, 0, TicTacToeError::GameAlreadyStarted);
-        self.players = players;
-        self.turn = 1;
-        Ok(())
-    }
+#[derive(Accounts)]
+pub struct CreateEvent<'info> {
+    #[account(
+        init,
+        payer = authority,
+        space = constants::EVENT_SPACE,
+        seeds = [b"event", organizer.key().as_ref(), &organizer.event_count.to_le_bytes()],
+        bump
+    )]
+    pub event: Account<'info, Event>,
+    #[account(
+        mut,
+        seeds = [b"organizer", authority.key().as_ref()],
+        bump,
+        constraint = organizer.authority == authority.key()
+    )]
+    pub organizer: Account<'info, Organizer>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
 
-    pub fn is_active(&self) -> bool {
-        self.state == GameState::Active
-    }
+#[derive(Accounts)]
+pub struct UpdateEvent<'info> {
+    #[account(
+        mut,
+        seeds = [b"event", organizer.key().as_ref(), &event.event_number.to_le_bytes()],
+        bump,
+        constraint = event.organizer == organizer.key()
+    )]
+    pub event: Account<'info, Event>,
+    #[account(
+        seeds = [b"organizer", authority.key().as_ref()],
+        bump,
+        constraint = organizer.authority == authority.key()
+    )]
+    pub organizer: Account<'info, Organizer>,
+    pub authority: Signer<'info>,
+}
 
-    fn curren_player_index(&self) -> usize {
-        ((self.turn - 1) % 2) as usize
-    }
+#[derive(Accounts)]
+pub struct CloseEvent<'info> {
+    #[account(
+        mut,
+        seeds = [b"event", organizer.key().as_ref(), &event.event_number.to_le_bytes()],
+        bump,
+        constraint = event.organizer == organizer.key(),
+        close = authority
+    )]
+    pub event: Account<'info, Event>,
+    #[account(
+        seeds = [b"organizer", authority.key().as_ref()],
+        bump,
+        constraint = organizer.authority == authority.key()
+    )]
+    pub organizer: Account<'info, Organizer>,
+    #[account(mut)]
+    pub authority: Signer<'info>,
+}
 
-    pub fn current_player(&self) -> Pubkey {
-        self.players[self.curren_player_index()]
-    }
+#[account]
+pub struct Organizer {
+    pub name: String,
+    pub is_active: bool,
+    pub authority: Pubkey,
+    pub event_count: u64,
+}
 
-    fn is_winning_trio(&self, trio: [(usize, usize); 3]) -> bool {
-        let [first, second, third] = trio;
-        self.board[first.0][first.1].is_some()
-            && self.board[first.0][first.1] == self.board[second.0][second.1]
-            && self.board[first.0][first.1] == self.board[third.0][third.1]
-    }
+#[account]
+pub struct Event {
+    pub event_number: u64,
+    pub name: String,
+    pub date: i64,
+    pub venue: String,
+    pub total_tickets: u32,
+    pub available_tickets: u32,
+    pub base_price: u64,
+    pub organizer: Pubkey,
+    pub is_active: bool,
+}
 
-    fn update_state(&mut self) {
-        for i in 0..=2 {
-            let horizontal = [(i, 0), (i, 1), (i, 2)];
-            if self.is_winning_trio(horizontal) {
-                self.state = GameState::Won {
-                    winner: self.current_player(),
-                };
-                return;
-            }
-            let vertical = [(0, i), (1, i), (2, i)];
-            if self.is_winning_trio(vertical) {
-                self.state = GameState::Won {
-                    winner: self.current_player(),
-                };
-                return;
-            }
+#[error_code]
+pub enum ErrorCode {
+    #[msg("The organizer is not active")]
+    OrganizerNotActive,
+    #[msg("Name is required")]
+    InvalidName,
+    #[msg("Enter a valid future date")]
+    InvalidDate,
+    #[msg("Venue is required")]
+    InvalidVenue,
+    #[msg("Total tickets must be greater than zero")]
+    InvalidTotalTickets,
+}
 
-            let diagonal_left = [(0, 0), (1, 1), (2, 2)];
-            let diagonal_right = [(0, 2), (1, 1), (2, 0)];
-            if self.is_winning_trio(diagonal_left) || self.is_winning_trio(diagonal_right) {
-                self.state = GameState::Won {
-                    winner: self.current_player(),
-                };
-                return;
-            }
-        }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct EventAttribute {
+    pub name: String,
+    pub date: i64,
+    pub venue: String,
+    pub total_tickets: u32,
+    pub base_price: u64,
+}
 
-        for row in 0..=2 {
-            for column in 0..2 {
-                if self.board[row][column].is_none() {
-                    return;
-                }
-            }
-        }
-
-        self.state = GameState::Tie
-    }
-
-    //Explain this, focus on the match
-    pub fn play(&mut self, tile: &Tile) -> Result<()> {
-        require!(self.is_active(), TicTacToeError::GameAlreadyOver);
-        match tile {
-            tile @ Tile {
-                row: 0..=2,
-                column: 0..=2,
-            } => match self.board[tile.row as usize][tile.column as usize] {
-                Some(_) => return Err(TicTacToeError::TileAlreadySet.into()),
-                None => {
-                    let sign = if self.curren_player_index() == 0 {
-                        Sign::X
-                    } else {
-                        Sign::O
-                    };
-                    self.board[tile.row as usize][tile.column as usize] = Some(sign);
-                }
-            },
-            _ => return Err(TicTacToeError::TileOutOfBounds.into()),
-        }
-        self.update_state();
-        if GameState::Active == self.state {
-            self.turn += 1
-        }
-        Ok(())
-    }
+fn validate_event_attributes(props: &EventAttribute) -> Result<()> {
+    require!(!props.name.is_empty(), ErrorCode::InvalidName);
+    require!(!props.venue.is_empty(), ErrorCode::InvalidVenue);
+    require!(props.total_tickets > 0, ErrorCode::InvalidTotalTickets);
+    Ok(())
 }
